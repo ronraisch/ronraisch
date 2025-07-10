@@ -3,12 +3,11 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from skimage.transform import resize
 import os
 from logging import warning
 import streamlit as st
 
-ROOT_DIR = Path('..')
+ROOT_DIR = Path('/home/ronraisch')
 
 import os
 from pathlib import Path
@@ -33,7 +32,7 @@ def ensure_dirs(base_dir:Path =BASE_DIR)-> Tuple[Path, Path]:
     return pos_dir, neg_dir
 
 def normalize_image(img: np.ndarray) -> np.ndarray:
-    mi, ma = float(img.min()), float(img.max())
+    mi, ma = img.min(), img.max()
     if ma > mi:
         norm = (img - mi) / (ma - mi) * 255.0
     else:
@@ -43,7 +42,7 @@ def normalize_image(img: np.ndarray) -> np.ndarray:
 
 def preprocess_image(
     img: np.ndarray,
-    size: Tuple[int, int] = (300, 300),
+    size: Tuple[int, int] = (600, 600),
     clip_limit: float = 2.0,
     tile_grid_size: Tuple[int, int] = (8, 8)
 ) -> np.ndarray:
@@ -95,20 +94,7 @@ def random_index_iterator(dim0: int, dim1: int) -> Iterator[Tuple[int, int]]:
     for idx in indices:
         yield idx
 
-def main():
-    st.title("Image Labeling Tool")
-
-    X =  np.load(f'{ROOT_DIR}/data/proccessed/X.npy')
-    num_images, H, W, num_channels = X.shape
-    pos_dir, neg_dir = ensure_dirs()
-
-    # Initialize indices iterator in session state
-    if 'indices' not in st.session_state:
-        st.session_state.indices = list(random_index_iterator(num_images, num_channels))
-        st.session_state.idx = 0
-
-
-    # Controls
+def add_label_buttons():
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         if st.button("Positive"):
@@ -124,6 +110,22 @@ def main():
     with col4:
         if st.button("Exit"):
             st.stop()
+    return label
+
+def main():
+    st.title("Image Labeling Tool")
+
+    X =  np.load(f'{ROOT_DIR}/data/proccessed/X.npy')
+    num_images, H, W, num_channels = X.shape
+    pos_dir, neg_dir = ensure_dirs()
+
+    # Initialize indices iterator in session state
+    if 'indices' not in st.session_state:
+        st.session_state.indices = list(random_index_iterator(num_images, num_channels))
+        st.session_state.idx = 0
+
+    # Controls
+    label = add_label_buttons()
 
     # Process label action
     if 'label' in locals() and label:
@@ -147,8 +149,7 @@ def main():
         # display image
         raw = get_image(X, idx_tuple)
         proc = preprocess_image(raw)
-        disp = (proc * 255).astype(np.uint8)
-        pil = Image.fromarray(disp).resize((600, 600))
+        pil = Image.fromarray(proc)
         st.image(pil, caption=name)
         break
     else:
