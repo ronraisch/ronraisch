@@ -1,159 +1,166 @@
 from pathlib import Path
 import random
+from typing import Optional, Union
 import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-import os
-from logging import warning
+from PIL import Image
+import cv2
 import streamlit as st
 
+ 
+
 ROOT_DIR = Path('/home/ronraisch')
-
-import os
-from pathlib import Path
-import numpy as np
-from IPython.display import display, clear_output
-import ipywidgets as widgets
-from PIL import Image
-from typing import List, Tuple, Optional, Callable, Iterator
-import cv2
-import numpy as np
-
 BASE_DIR = Path(f'{ROOT_DIR}/data/labeled')
 
-IMAGE_FILE_TYPE = 'png'  
+IMAGE_FILE_TYPE = 'png'
 
 
-def ensure_dirs(base_dir:Path =BASE_DIR)-> Tuple[Path, Path]:
-    pos_dir = Path(base_dir) / "positive"
-    neg_dir = Path(base_dir) / "negative"
-    pos_dir.mkdir(parents=True, exist_ok=True)
-    neg_dir.mkdir(parents=True, exist_ok=True)
-    return pos_dir, neg_dir
+class ImageLabeler:
+    def __init__(self, x_path: Path, output_dir: Path, size=600, clip_limit=2.0, tile_grid_size=(8, 8)):
+        self.x_path = x_path
+        self.output_dir = Path(output_dir)
+        self._size = size
+        self.clip_limit = clip_limit
+        self.tile_grid_size = tile_grid_size
 
-def normalize_image(img: np.ndarray) -> np.ndarray:
-    mi, ma = img.min(), img.max()
-    if ma > mi:
-        norm = (img - mi) / (ma - mi) * 255.0
-    else:
-        norm = np.zeros_like(img)
-    return norm.astype(np.uint8)
+        self.X = self._load_data()
+        self.pos_dir, self.neg_dir = self._ensure_dirs()
 
+        self.num_images, self.H, self.W, self.num_channels = self.X.shape
+        self.init_indices()
 
-def preprocess_image(
-    img: np.ndarray,
-    size: Tuple[int, int] = (600, 600),
-    clip_limit: float = 2.0,
-    tile_grid_size: Tuple[int, int] = (8, 8)
-) -> np.ndarray:
-    """
-    1. Normalize raw floats to 0–255 uint8
-    2. Convert to single-channel if needed
-    3. Resize to `size`
-    4. Apply CLAHE
-    5. Return float32 image in [0,1]
-    """
-    # 1. Scale floats → 0–255
-    uint8_img = normalize_image(img)
+    @property
+    def size(self) -> tuple[int, int]:
+        if isinstance(self._size, int):
+            return (self._size, self._size)
+        elif isinstance(self._size, tuple) and len(self._size) == 2:
+            return self._size
+        raise ValueError("Size must be an int or a tuple of two ints (width, height).")
     
-    # 2. Ensure single‑channel
-    if uint8_img.ndim == 3 and uint8_img.shape[2] > 1:
-        uint8_img = cv2.cvtColor(uint8_img, cv2.COLOR_BGR2GRAY)
-    
-    # 3. Resize
-    resized = cv2.resize(uint8_img, size, interpolation=cv2.INTER_LINEAR)
-    
-    # 4. CLAHE
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
-    clahe_img = clahe.apply(resized)
-    
-    # 5. Back to uint8 for display
-    return clahe_img.astype(np.uint8)
-
-
-def is_already_labeled(name: str, pos_dir: Path, neg_dir: Path) -> bool:
-    return (pos_dir/f"{name}.{IMAGE_FILE_TYPE}").exists() or (neg_dir/f"{name}.{IMAGE_FILE_TYPE}").exists()
-
-def save_image(img: np.ndarray, name: str, target_dir: Path):
-    uint8_img = normalize_image(img)
-    Image.fromarray(uint8_img).save(target_dir / f"{name}.{IMAGE_FILE_TYPE}")
-
-def get_image(X: np.ndarray, index: Tuple[int, int]) -> np.ndarray:
-    first_index, second_index = index
-    if first_index >= X.shape[0] or second_index >= X.shape[-1]:
-        raise IndexError("Index out of bounds for the image array.")
-    return X[first_index, :, :, second_index]
-
-def get_image_name(index: Tuple[int, int]) -> str:
-    first_index, second_index = index
-    return f"image_{first_index}_channel_{second_index}"
-
-def random_index_iterator(dim0: int, dim1: int) -> Iterator[Tuple[int, int]]:
-    indices = [(i, j) for i in range(dim0) for j in range(dim1)]
-    random.shuffle(indices)
-    for idx in indices:
-        yield idx
-
-def add_label_buttons():
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        if st.button("Positive"):
-            label = 'pos'
+    @size.setter
+    def size(self, value: Union[int, tuple[int, int]]):
+        if isinstance(value, int) or (isinstance(value, tuple) and len(value) == 2):
+            self._size = value
         else:
-            label = None
-    with col2:
-        if st.button("Negative"):
-            label = 'neg'
-    with col3:
-        if st.button("Skip"):
-            label = 'skip'
-    with col4:
-        if st.button("Exit"):
-            st.stop()
-    return label
+            raise ValueError("Size must be an int or a tuple of two ints (width, height).")
+
+    def init_indices(self):
+        self.indices = random.sample(
+            [(i, j) for i in range(self.num_images) for j in range(self.num_channels)],
+            k=self.num_images * self.num_channels
+        )
+        self.idx = 0
+        self._prefetch_next()
+
+    def _load_data(self) -> np.ndarray:
+        return np.load(self.x_path)
+
+    def _ensure_dirs(self) -> tuple[Path, Path]:
+        pos = self.output_dir / "positive"
+        neg = self.output_dir / "negative"
+        pos.mkdir(parents=True, exist_ok=True)
+        neg.mkdir(parents=True, exist_ok=True)
+        return pos, neg
+
+    @staticmethod
+    def _normalize(img: np.ndarray) -> np.ndarray:
+        mi, ma = float(img.min()), float(img.max())
+        if ma > mi:
+            img = (img - mi) / (ma - mi) * 255.0
+        else:
+            img = np.zeros_like(img)
+        return img.astype(np.uint8)
+
+    def _preprocess(self, raw: np.ndarray) -> Image.Image:
+        uint8 = self._normalize(raw)
+        if uint8.ndim == 3 and uint8.shape[2] > 1:
+            uint8 = cv2.cvtColor(uint8, cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize(uint8, self.size, interpolation=cv2.INTER_LINEAR)
+        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
+        clahe_img = clahe.apply(resized)
+        return Image.fromarray(clahe_img.astype(np.uint8))
+
+    def _get_raw(self, index: tuple) -> np.ndarray:
+        i, c = index
+        return self.X[i, :, :, c]
+
+    def _get_name(self, index: tuple) -> str:
+        i, c = index
+        return f"image_{i}_channel_{c}"
+
+    def _is_labeled(self, name: str) -> bool:
+        return (self.pos_dir/f"{name}.{IMAGE_FILE_TYPE}").exists() or \
+               (self.neg_dir/f"{name}.{IMAGE_FILE_TYPE}").exists()
+
+    def _save(self, raw: np.ndarray, name: str, label: str):
+        uint8 = self._normalize(raw)
+        target = self.pos_dir if label == 'pos' else self.neg_dir
+        Image.fromarray(uint8).save(target / f"{name}.{IMAGE_FILE_TYPE}")
+
+    def _prefetch_next(self):
+        # move to next unlabeled
+        while self.idx < len(self.indices):
+            idx = self.indices[self.idx]
+            name = self._get_name(idx)
+            if not self._is_labeled(name):
+                raw = self._get_raw(idx)
+                self.next_raw = raw
+                self.next_proc = self._preprocess(raw)
+                self.next_name = name
+                return
+            self.idx += 1
+        self.next_raw = None
+        self.next_proc = None
+        self.next_name = None
+
+    def label_current(self, label: Optional[str]):
+        if label in ('pos', 'neg') and self.next_raw is not None and self.next_name is not None:
+            self._save(self.next_raw, self.next_name, label)
+        self.idx += 1
+        self._prefetch_next()
+
+    def has_next(self) -> bool:
+        return self.next_proc is not None
+
+    def display(self):
+        if self.has_next() and self.next_proc is not None:
+
+            st.image(self.next_proc, caption=self.next_name)
+        else:
+            st.success("All images labeled or skipped.")
+
 
 def main():
     st.title("Image Labeling Tool")
+    ROOT = Path('/home/ronraisch')
+    x_path = ROOT / 'data' / 'processed' / 'X.npy'
+    output_dir = ROOT / 'data' / 'labeled'
 
-    X =  np.load(f'{ROOT_DIR}/data/proccessed/X.npy')
-    num_images, H, W, num_channels = X.shape
-    pos_dir, neg_dir = ensure_dirs()
+    if 'labeler' not in st.session_state:
+        st.session_state.labeler = ImageLabeler(x_path, output_dir)
+    labeler = st.session_state.labeler
 
-    # Initialize indices iterator in session state
-    if 'indices' not in st.session_state:
-        st.session_state.indices = list(random_index_iterator(num_images, num_channels))
-        st.session_state.idx = 0
+    cols = st.columns(5)
+    label = None
+    with cols[0]:
+        if st.button("Positive"): label = 'pos'
+    with cols[1]:
+        if st.button("Negative"): label = 'neg'
+    with cols[2]:
+        if st.button("Skip"): label = 'skip'
+    with cols[3]:
+        if st.button("Exit"): st.stop()
+    with cols[4]:
+        # add slider to determine size of the image
+        labeler.size = int(st.slider("Image Size", 100, 1000, 600))
 
-    # Controls
-    label = add_label_buttons()
+    if label:
+        if label != 'skip':
+            labeler.label_current(label)
+        else:
+            labeler.idx += 1
+            labeler._prefetch_next()
 
-    # Process label action
-    if 'label' in locals() and label:
-        idx_tuple = st.session_state.indices[st.session_state.idx]
-        name = get_image_name(idx_tuple)
-        raw = get_image(X, idx_tuple)
-        if label == 'pos':
-            save_image(raw, name, pos_dir)
-        elif label == 'neg':
-            save_image(raw, name, neg_dir)
-        # advance
-        st.session_state.idx += 1
+    labeler.display()
 
-    # Skip already labeled or show next image
-    while st.session_state.idx < len(st.session_state.indices):
-        idx_tuple = st.session_state.indices[st.session_state.idx]
-        name = get_image_name(idx_tuple)
-        if is_already_labeled(name, pos_dir, neg_dir):
-            st.session_state.idx += 1
-            continue
-        # display image
-        raw = get_image(X, idx_tuple)
-        proc = preprocess_image(raw)
-        pil = Image.fromarray(proc)
-        st.image(pil, caption=name)
-        break
-    else:
-        st.success("All images labeled or skipped.")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
