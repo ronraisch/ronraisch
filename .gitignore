@@ -15,4 +15,4 @@
 .wget-hsts
 data/raw
 data/pretrained
-data/processed
+data/processed/X.npy
