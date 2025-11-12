@@ -17,3 +17,4 @@ data/raw
 data/pretrained
 data/processed/X.npy
 data/proccessed/X.npy
+*.npy
